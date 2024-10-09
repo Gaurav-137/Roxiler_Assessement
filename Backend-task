@@ -1,0 +1,157 @@
+import requests
+import json
+from flask import Flask, request, jsonify
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Numeric, func
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+
+app = Flask(__name__)
+DATABASE_URL = 'sqlite:///products.db'
+engine = create_engine(DATABASE_URL)
+Base = declarative_base()
+Session = sessionmaker(bind=engine)
+session = Session()
+
+class ProductTransaction(Base):
+    __tablename__ = 'product_transactions'
+    id = Column(Integer, primary_key=True)
+    title = Column(String)
+    price = Column(Numeric(10, 2))
+    description = Column(String)
+    category = Column(String)
+    image = Column(String)
+    sold = Column(Boolean)
+    dateOfSale = Column(DateTime)
+
+Base.metadata.create_all(engine)
+
+def initialize_database():
+    url = "https://s3.amazonaws.com/roxiler.com/product_transaction.json"
+    response = requests.get(url)
+    if response.status_code == 200:
+        data = response.json()
+        for item in data:
+            product = ProductTransaction(**item)
+            session.add(product)
+        session.commit()
+        print("Database initialized with seed data.")
+    else:
+        print("Failed to fetch data from the API.")
+
+# Uncomment the line below to initialize the database when running for the first time
+# initialize_database()
+
+@app.route('/transactions', methods=['GET'])
+def list_transactions():
+    page = request.args.get('page', default=1, type=int)
+    per_page = request.args.get('per_page', default=10, type=int)
+    search_text = request.args.get('search', default='', type=str)
+
+    query = session.query(ProductTransaction)
+
+    if search_text:
+        query = query.filter(
+            (ProductTransaction.title.ilike(f'%{search_text}%')) |
+            (ProductTransaction.description.ilike(f'%{search_text}%')) |
+            (ProductTransaction.price.like(f'%{search_text}%'))
+        )
+
+    transactions = query.offset((page - 1) * per_page).limit(per_page).all()
+    
+    return jsonify([{
+        'id': transaction.id,
+        'title': transaction.title,
+        'price': str(transaction.price),
+        'description': transaction.description,
+        'category': transaction.category,
+        'image': transaction.image,
+        'sold': transaction.sold,
+        'dateOfSale': transaction.dateOfSale.isoformat()
+    } for transaction in transactions])
+
+@app.route('/statistics', methods=['GET'])
+def statistics():
+    month = request.args.get('month')
+    
+    total_sales = session.query(func.sum(ProductTransaction.price)).filter(func.strftime('%m', ProductTransaction.dateOfSale) == month).scalar() or 0
+    
+    total_sold_items = session.query(func.count(ProductTransaction.id)).filter(ProductTransaction.sold == True, func.strftime('%m', ProductTransaction.dateOfSale) == month).scalar() or 0
+    
+    total_not_sold_items = session.query(func.count(ProductTransaction.id)).filter(ProductTransaction.sold == False, func.strftime('%m', ProductTransaction.dateOfSale) == month).scalar() or 0
+
+    return jsonify({
+        'total_sales': str(total_sales),
+        'total_sold_items': total_sold_items,
+        'total_not_sold_items': total_not_sold_items
+    })
+
+@app.route('/bar-chart', methods=['GET'])
+def bar_chart():
+    month = request.args.get('month')
+    
+    ranges = {
+        '0-100': 0,
+        '101-200': 0,
+        '201-300': 0,
+        '301-400': 0,
+        '401-500': 0,
+        '501-600': 0,
+        '601-700': 0,
+        '701-800': 0,
+        '801-900': 0,
+        '901-above': 0,
+    }
+    
+    transactions = session.query(ProductTransaction).filter(func.strftime('%m', ProductTransaction.dateOfSale) == month).all()
+
+    for transaction in transactions:
+        price = transaction.price
+        if price <= 100:
+            ranges['0-100'] += 1
+        elif price <= 200:
+            ranges['101-200'] += 1
+        elif price <= 300:
+            ranges['201-300'] += 1
+        elif price <= 400:
+            ranges['301-400'] += 1
+        elif price <= 500:
+            ranges['401-500'] += 1
+        elif price <= 600:
+            ranges['501-600'] += 1
+        elif price <= 700:
+            ranges['601-700'] += 1
+        elif price <= 800:
+            ranges['701-800'] += 1
+        elif price <= 900:
+            ranges['801-900'] += 1
+        else:
+            ranges['901-above'] += 1
+            
+    return jsonify(ranges)
+
+@app.route('/pie-chart', methods=['GET'])
+def pie_chart():
+    month = request.args.get('month')
+    
+    categories_count = session.query(ProductTransaction.category, func.count(ProductTransaction.id)).filter(func.strftime('%m', ProductTransaction.dateOfSale) == month).group_by(ProductTransaction.category).all()
+
+    return jsonify({category: count for category, count in categories_count})
+
+@app.route('/combined-data', methods=['GET'])
+def combined_data():
+    month = request.args.get('month')
+
+    statistics_data = statistics().json
+    bar_chart_data = bar_chart().json
+    pie_chart_data = pie_chart().json
+    
+    combined_response = {
+        'statistics': statistics_data,
+        'bar_chart': bar_chart_data,
+        'pie_chart': pie_chart_data,
+    }
+    
+    return jsonify(combined_response)
+
+if __name__ == '__main__':
+    app.run(debug=True)
